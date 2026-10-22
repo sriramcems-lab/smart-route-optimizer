@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart Route Optimizer | Ant Colony Optimization & Google Maps</title>
+    <!-- Leaflet CSS for seamless Demo Mode fallback when no Google API key is supplied -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+    <!-- Application Stylesheet -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <!-- Google Fonts for modern engineering dashboard typography -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+</head>
+<body>
+    <header class="app-header">
+        <div class="header-brand">
+            <div class="brand-icon">🐜</div>
+            <div>
+                <h1 class="brand-title">Smart Route Optimizer</h1>
+                <p class="brand-subtitle">Ant Colony Optimization (ACO) & Geospatial Routing</p>
+            </div>
+        </div>
+        <div class="header-badges">
+            <div id="data-source-badge" class="badge {{ 'badge-demo' if is_demo_mode else 'badge-live' }}">
+                <span class="badge-dot"></span>
+                <span id="badge-text">{{ 'SIMULATED DATA (DEMO MODE)' if is_demo_mode else 'LIVE GOOGLE DATA' }}</span>
+            </div>
+            <button id="btn-info" class="btn-icon" title="Project Information & Methodology">ℹ️</button>
+        </div>
+    </header>
+
+    <main class="dashboard-layout">
+        <!-- LEFT CONTROL SIDEBAR -->
+        <aside class="sidebar-panel">
+            <!-- Sample Preset Routes -->
+            <div class="card preset-card">
+                <div class="card-header">
+                    <span class="card-title">📍 Quick Presets</span>
+                </div>
+                <div class="card-body">
+                    <label for="preset-select" class="form-label">Load sample benchmark route:</label>
+                    <select id="preset-select" class="form-select">
+                        <option value="">-- Choose a benchmark route --</option>
+                        <option value="bangalore">Bangalore Tech Hubs (5 stops)</option>
+                        <option value="linear_benchmark">Linear Benchmark / Zigzag (5 stops)</option>
+                        <option value="nyc">New York Landmarks (6 stops)</option>
+                        <option value="london">Central London Sights (5 stops)</option>
+                    </select>
+                </div>
+            </div>
+
+            <!-- Stop Management Card -->
+            <div class="card stops-card">
+                <div class="card-header">
+                    <span class="card-title">🚏 Route Waypoints</span>
+                    <span id="stops-counter" class="badge badge-neutral">0 / 15 stops</span>
+                </div>
+                <div class="card-body">
+                    <!-- Search input for adding stops -->
+                    <div class="search-box-container">
+                        <input type="text" id="place-search-input" class="form-input" placeholder="🔍 Search place or click map to add..." autocomplete="off">
+                        <button type="button" id="btn-add-searched-stop" class="btn btn-secondary btn-sm" title="Add location as stop">Add</button>
+                    </div>
+
+                    <div id="stops-container" class="stops-list">
+                        <!-- Dynamic Stop Items injected by app.js -->
+                    </div>
+
+                    <div class="stops-actions">
+                        <button type="button" id="btn-add-stop" class="btn btn-outline btn-sm">+ Add Intermediate Stop</button>
+                        <button type="button" id="btn-reset-stops" class="btn btn-text btn-sm text-danger">Reset All</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Optimization Objective & ACO Settings -->
+            <div class="card settings-card">
+                <div class="card-header">
+                    <span class="card-title">⚙️ Optimization Objective</span>
+                </div>
+                <div class="card-body">
+                    <div class="objective-selector">
+                        <label class="radio-option">
+                            <input type="radio" name="opt-objective" value="distance" checked>
+                            <span class="radio-custom"></span>
+                            <div class="radio-label">
+                                <strong>Minimize Distance</strong>
+                                <span>Shortest travel mileage (meters)</span>
+                            </div>
+                        </label>
+                        <label class="radio-option">
+                            <input type="radio" name="opt-objective" value="time">
+                            <span class="radio-custom"></span>
+                            <div class="radio-label">
+                                <strong>Minimize Travel Time</strong>
+                                <span>Fastest road duration (seconds)</span>
+                            </div>
+                        </label>
+                    </div>
+
+                    <!-- Collapsible ACO Hyperparameters -->
+                    <details class="aco-parameters-details" id="aco-details">
+                        <summary class="aco-details-summary">
+                            <span>🐜 ACO Hyperparameters</span>
+                            <span class="summary-toggle-icon">▼</span>
+                        </summary>
+                        <div class="aco-params-grid">
+                            <div class="param-group">
+                                <label for="param-ants">Colony Ants (m):</label>
+                                <input type="number" id="param-ants" class="form-input param-input" value="20" min="2" max="100" step="1">
+                                <small class="param-hint">Number of ants per generation</small>
+                            </div>
+                            <div class="param-group">
+                                <label for="param-iterations">Iterations (T):</label>
+                                <input type="number" id="param-iterations" class="form-input param-input" value="40" min="5" max="200" step="1">
+                                <small class="param-hint">Generations to evolve</small>
+                            </div>
+                            <div class="param-group">
+                                <label for="param-alpha">Pheromone Weight (&alpha;):</label>
+                                <input type="number" id="param-alpha" class="form-input param-input" value="1.0" min="0" max="5" step="0.1">
+                                <small class="param-hint">History & memory influence</small>
+                            </div>
+                            <div class="param-group">
+                                <label for="param-beta">Heuristic Weight (&beta;):</label>
+                                <input type="number" id="param-beta" class="form-input param-input" value="2.5" min="0" max="10" step="0.1">
+                                <small class="param-hint">Immediate distance visibility</small>
+                            </div>
+                            <div class="param-group">
+                                <label for="param-evaporation">Evaporation Rate (&rho;):</label>
+                                <input type="number" id="param-evaporation" class="form-input param-input" value="0.2" min="0.01" max="0.99" step="0.05">
+                                <small class="param-hint">Pheromone decay factor</small>
+                            </div>
+                            <div class="param-group">
+                                <label for="param-q">Deposit Scale (Q):</label>
+                                <input type="number" id="param-q" class="form-input param-input" value="100.0" min="1" max="1000" step="10">
+                                <small class="param-hint">Pheromone deposit magnitude</small>
+                            </div>
+                            <div class="param-group full-width">
+                                <label for="param-seed">Random Seed (optional):</label>
+                                <input type="number" id="param-seed" class="form-input param-input" placeholder="e.g. 42 (for reproducible viva demo)">
+                                <small class="param-hint">Fix seed for deterministic comparisons</small>
+                            </div>
+                            <div class="param-actions full-width">
+                                <button type="button" id="btn-reset-params" class="btn btn-text btn-xs">Reset to Standard Defaults</button>
+                            </div>
+                        </div>
+                    </details>
+                </div>
+            </div>
+
+            <!-- Primary Action Controls -->
+            <div class="actions-panel">
+                <button type="button" id="btn-optimize" class="btn btn-primary btn-lg full-width">
+                    <span class="btn-icon">⚡</span> Run ACO Optimization
+                </button>
+                <div id="status-spinner" class="status-spinner hidden">
+                    <div class="spinner"></div>
+                    <span id="spinner-text">Simulating Ant Colony...</span>
+                </div>
+                <div id="error-message" class="alert-box alert-error hidden"></div>
+            </div>
+
+            <!-- Scientific Disclaimer -->
+            <div class="disclaimer-box">
+                <small><strong>Note:</strong> Ant Colony Optimization is a metaheuristic algorithm. It searches the discrete pairwise cost matrix of selected stops and finds high-quality, near-optimal paths, but does not mathematically guarantee the global optimum.</small>
+            </div>
+        </aside>
+
+        <!-- RIGHT MAIN AREA: MAP & RESULTS -->
+        <section class="main-panel">
+            <div class="map-wrapper">
+                <div id="map" class="map-container"></div>
+                <div class="map-overlay-instructions">
+                    <span>💡 Click map to add a stop • Min 2 stops required • Drag or use arrows to reorder</span>
+                </div>
+
+                <!-- Map Legend / Layer Toggles Overlay -->
+                <div id="map-legend" class="map-legend hidden">
+                    <span class="legend-title">Route Layers</span>
+                    <label class="legend-item">
+                        <input type="checkbox" id="chk-show-optimized" checked>
+                        <span class="legend-line legend-optimized"></span>
+                        <span>ACO Route</span>
+                    </label>
+                    <label class="legend-item">
+                        <input type="checkbox" id="chk-show-baseline" checked>
+                        <span class="legend-line legend-baseline"></span>
+                        <span>Original Order</span>
+                    </label>
+                </div>
+            </div>
+
+            <!-- RESULTS PANEL (Populated dynamically on optimization) -->
+            <div id="results-panel" class="results-panel hidden">
+                <div class="results-header">
+                    <div>
+                        <h3 class="results-title">Route Optimization Results</h3>
+                        <span id="results-datasource-badge" class="badge badge-demo">SIMULATED DATA</span>
+                    </div>
+                    <button type="button" id="btn-close-results" class="btn-close" title="Close results">&times;</button>
+                </div>
+
+                <div class="results-body">
+                    <!-- Metrics Summary Cards -->
+                    <div class="metrics-grid">
+                        <div class="metric-card">
+                            <span class="metric-label">Total Distance</span>
+                            <div class="metric-value" id="metric-opt-dist">-- km</div>
+                            <span class="metric-comparison" id="metric-base-dist">Original: -- km</span>
+                        </div>
+                        <div class="metric-card">
+                            <span class="metric-label">Estimated Duration</span>
+                            <div class="metric-value" id="metric-opt-time">-- min</div>
+                            <span class="metric-comparison" id="metric-base-time">Original: -- min</span>
+                        </div>
+                        <div class="metric-card highlight">
+                            <span class="metric-label">Efficiency Gain</span>
+                            <div class="metric-value text-success" id="metric-improvement">-- %</div>
+                            <span class="metric-comparison" id="metric-savings-detail">Saved: --</span>
+                        </div>
+                    </div>
+
+                    <!-- Comparison Table & Chart Grid -->
+                    <div class="results-visuals-grid">
+                        <!-- Comparative Table -->
+                        <div class="table-wrapper">
+                            <h4 class="itinerary-title">Baseline vs ACO Comparison</h4>
+                            <table class="comparison-table">
+                                <thead>
+                                    <tr>
+                                        <th>Metric</th>
+                                        <th>Baseline Order</th>
+                                        <th>ACO Optimized</th>
+                                        <th>Difference</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr>
+                                        <td><strong>Road Distance</strong></td>
+                                        <td id="tbl-base-dist">--</td>
+                                        <td id="tbl-opt-dist" class="text-bold">--</td>
+                                        <td id="tbl-diff-dist" class="text-success text-bold">--</td>
+                                    </tr>
+                                    <tr>
+                                        <td><strong>Travel Duration</strong></td>
+                                        <td id="tbl-base-time">--</td>
+                                        <td id="tbl-opt-time" class="text-bold">--</td>
+                                        <td id="tbl-diff-time" class="text-success text-bold">--</td>
+                                    </tr>
+                                    <tr>
+                                        <td><strong>Stop Sequence</strong></td>
+                                        <td id="tbl-base-seq" class="text-mono">--</td>
+                                        <td id="tbl-opt-seq" class="text-mono text-bold">--</td>
+                                        <td><span class="badge badge-neutral" id="tbl-order-status">Reordered</span></td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+
+                        <!-- HTML5 Canvas Visual Chart -->
+                        <div class="chart-wrapper">
+                            <div class="chart-header">
+                                <h4 class="itinerary-title" id="chart-title">Route Cost Comparison</h4>
+                                <div class="chart-tabs">
+                                    <button type="button" id="tab-bar-chart" class="chart-tab active">Bar Chart</button>
+                                    <button type="button" id="tab-convergence-chart" class="chart-tab">Convergence Curve</button>
+                                </div>
+                            </div>
+                            <div class="canvas-container">
+                                <canvas id="analytics-canvas" width="500" height="240"></canvas>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Step-by-Step Optimized Itinerary -->
+                    <div class="itinerary-section">
+                        <h4 class="itinerary-title">Optimized Visiting Sequence</h4>
+                        <ol id="itinerary-list" class="itinerary-list">
+                            <!-- Injected by JavaScript -->
+                        </ol>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <!-- Project Info Modal -->
+    <div id="info-modal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>About Smart Route Optimizer</h3>
+                <button id="btn-close-modal" class="btn-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <h4>Ant Colony Optimization (ACO)</h4>
+                <p>An algorithm inspired by social ants finding shortest foraging trails using pheromone deposition and evaporation. Start and destination are fixed, while intermediate stops are visited exactly once (Open TSP with Fixed Endpoints).</p>
+                <h4>Data Modes</h4>
+                <ul>
+                    <li><strong>Demo Mode (Simulated Data):</strong> Generates physically realistic road costs via the Haversine formula, an urban circuity multiplier (1.35), and city speed models (35 km/h) without calling Google APIs or requiring credentials.</li>
+                    <li><strong>Live Mode (Google Data):</strong> Calls Google Routes API Compute Route Matrix v2 for live road costs and Compute Routes v2 for geometry.</li>
+                </ul>
+                <h4>Security</h4>
+                <p>Google Maps Server API keys are strictly quarantined to the backend Python environment. The client receives only a website-restricted browser key.</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Leaflet JS for fallback map in Demo Mode -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+
+    <!-- Global Application Configuration safely provided by Flask -->
+    <script>
+        window.APP_CONFIG = {
+            browserApiKey: "{{ browser_api_key or '' }}",
+            isDemoMode: {{ 'true' if is_demo_mode else 'false' }},
+            endpoints: {
+                optimize: "/api/optimize",
+                route: "/api/route"
+            }
+        };
+    </script>
+
+    <!-- Application Controller -->
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+
+    <!-- Google Maps JS API (Loaded dynamically if browserApiKey is present) -->
+    {% if browser_api_key %}
+    <script async defer src="https://maps.googleapis.com/maps/api/js?key={{ browser_api_key }}&libraries=places,geometry&callback=initGoogleMaps"></script>
+    {% endif %}
+</body>
+</html>
