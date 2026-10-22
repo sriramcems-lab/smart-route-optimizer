@@ -160,12 +160,19 @@ def validate_optimize_request(data: Any) -> Tuple[List[Dict[str, Any]], str, Dic
     return validated_stops, objective, aco_params, force_demo
 
 
+BASE_DIR = Path(__file__).resolve().parent
+
+
 def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
     """
     Application factory for the Flask app.
     Supports dependency injection for test configurations.
     """
-    app = Flask(__name__)
+    app = Flask(
+        __name__,
+        template_folder=str(BASE_DIR / "templates"),
+        static_folder=str(BASE_DIR / "static"),
+    )
 
     # Configure secret key for session security
     app.config["SECRET_KEY"] = os.getenv("FLASK_SECRET_KEY", "default-dev-secret-key-change-in-prod")
