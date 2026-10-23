@@ -258,6 +258,281 @@
         return coordinates;
     }
 
+    function encodePolyline(points) {
+        if (!points || points.length === 0) return "";
+        let result = "";
+        let prevLat = 0;
+        let prevLng = 0;
+
+        function encodeSigned(val) {
+            let sval = val < 0 ? ~(val << 1) : (val << 1);
+            let chunks = "";
+            while (sval >= 0x20) {
+                chunks += String.fromCharCode((0x20 | (sval & 0x1f)) + 63);
+                sval >>= 5;
+            }
+            chunks += String.fromCharCode(sval + 63);
+            return chunks;
+        }
+
+        for (let i = 0; i < points.length; i++) {
+            const late5 = Math.round(points[i][0] * 1e5);
+            const lnge5 = Math.round(points[i][1] * 1e5);
+            result += encodeSigned(late5 - prevLat);
+            result += encodeSigned(lnge5 - prevLng);
+            prevLat = late5;
+            prevLng = lnge5;
+        }
+        return result;
+    }
+
+    /* ==========================================================================
+       CLIENT-SIDE ACO ENGINE (STANDALONE & STATIC HOSTING FALLBACK)
+       ========================================================================== */
+
+    function solveAcoClientSide(payload) {
+        const stops = payload.stops;
+        const N = stops.length;
+        const objective = payload.objective || "distance";
+        const params = payload.aco_params || {};
+        const numAnts = params.num_ants || 20;
+        const iterations = params.iterations || 40;
+        const alpha = params.alpha !== undefined ? params.alpha : 1.0;
+        const beta = params.beta !== undefined ? params.beta : 2.5;
+        const rho = params.evaporation_rate !== undefined ? params.evaporation_rate : 0.2;
+        const Q = params.q !== undefined ? params.q : 100.0;
+
+        // 1. Build Distance & Duration matrices using Haversine formula with 1.35 circuity
+        const R = 6371000; // Earth radius in meters
+        const toRad = (deg) => (deg * Math.PI) / 180.0;
+        const circuity = 1.35;
+        const speedMps = 35000 / 3600.0; // 35 km/h in m/s
+
+        const distMatrix = Array.from({ length: N }, () => new Float64Array(N));
+        const durMatrix = Array.from({ length: N }, () => new Float64Array(N));
+
+        for (let i = 0; i < N; i++) {
+            for (let j = 0; j < N; j++) {
+                if (i === j) {
+                    distMatrix[i][j] = 0;
+                    durMatrix[i][j] = 0;
+                } else {
+                    const dLat = toRad(stops[j].lat - stops[i].lat);
+                    const dLng = toRad(stops[j].lng - stops[i].lng);
+                    const lat1 = toRad(stops[i].lat);
+                    const lat2 = toRad(stops[j].lat);
+                    const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
+                    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+                    const roadMeters = Math.round(R * c * circuity);
+                    distMatrix[i][j] = roadMeters;
+                    durMatrix[i][j] = Math.round(roadMeters / speedMps);
+                }
+            }
+        }
+
+        const costMatrix = objective === "duration" ? durMatrix : distMatrix;
+
+        // 2. Baseline tour [0, 1, ..., N-1]
+        const baselineTour = Array.from({ length: N }, (_, i) => i);
+        let baselineCost = 0;
+        for (let i = 0; i < N - 1; i++) {
+            baselineCost += costMatrix[baselineTour[i]][baselineTour[i + 1]];
+        }
+
+        if (N <= 2) {
+            return formatClientResult(stops, baselineTour, baselineTour, distMatrix, durMatrix, [baselineCost], [baselineCost]);
+        }
+
+        // 3. Heuristic Matrix: eta_ij = 1 / cost_ij
+        const eta = Array.from({ length: N }, (_, i) =>
+            Array.from({ length: N }, (_, j) => (i === j || costMatrix[i][j] <= 0 ? 0 : 1.0 / costMatrix[i][j]))
+        );
+
+        // 4. Initial Pheromone
+        const tau0 = Math.max(1e-6, 1.0 / (N * (baselineCost || 1)));
+        const tau = Array.from({ length: N }, () => new Float64Array(N).fill(tau0));
+
+        let bestTour = [...baselineTour];
+        let bestCost = baselineCost;
+        const bestHistory = [];
+        const avgHistory = [];
+
+        let rng = Math.random;
+        if (params.random_seed !== null && params.random_seed !== undefined) {
+            let s = params.random_seed;
+            rng = function() {
+                s = (s * 9301 + 49297) % 233280;
+                return s / 233280;
+            };
+        }
+
+        // 5. Ant Colony Optimization iterations
+        for (let iter = 0; iter < iterations; iter++) {
+            const iterationTours = [];
+            const iterationCosts = [];
+
+            for (let ant = 0; ant < numAnts; ant++) {
+                const tour = [0];
+                const unvisited = new Set(Array.from({ length: N - 2 }, (_, i) => i + 1));
+                let curr = 0;
+
+                while (unvisited.size > 0) {
+                    const candidates = Array.from(unvisited);
+                    const scores = candidates.map((cand) => {
+                        const t = Math.max(1e-9, tau[curr][cand]);
+                        const h = eta[curr][cand];
+                        return Math.pow(t, alpha) * Math.pow(h, beta);
+                    });
+                    const totalScore = scores.reduce((sum, s) => sum + s, 0);
+
+                    let nextNode;
+                    if (totalScore <= 0 || !isFinite(totalScore)) {
+                        nextNode = candidates[Math.floor(rng() * candidates.length)];
+                    } else {
+                        const r = rng() * totalScore;
+                        let cum = 0;
+                        nextNode = candidates[candidates.length - 1];
+                        for (let cIdx = 0; cIdx < candidates.length; cIdx++) {
+                            cum += scores[cIdx];
+                            if (r <= cum) {
+                                nextNode = candidates[cIdx];
+                                break;
+                            }
+                        }
+                    }
+
+                    unvisited.delete(nextNode);
+                    tour.push(nextNode);
+                    curr = nextNode;
+                }
+
+                tour.push(N - 1); // Destination locked
+
+                let antCost = 0;
+                for (let i = 0; i < N - 1; i++) {
+                    antCost += costMatrix[tour[i]][tour[i + 1]];
+                }
+
+                iterationTours.push(tour);
+                iterationCosts.push(antCost);
+
+                if (antCost < bestCost) {
+                    bestCost = antCost;
+                    bestTour = [...tour];
+                }
+            }
+
+            const avgCost = iterationCosts.reduce((a, b) => a + b, 0) / iterationCosts.length;
+            bestHistory.push(Math.round(bestCost * 100) / 100);
+            avgHistory.push(Math.round(avgCost * 100) / 100);
+
+            // Evaporation
+            for (let i = 0; i < N; i++) {
+                for (let j = 0; j < N; j++) {
+                    tau[i][j] *= (1.0 - rho);
+                }
+            }
+
+            // Pheromone deposit by all ants
+            for (let aIdx = 0; aIdx < numAnts; aIdx++) {
+                const t = iterationTours[aIdx];
+                const c = iterationCosts[aIdx];
+                const delta = Q / Math.max(c, 1e-6);
+                for (let i = 0; i < N - 1; i++) {
+                    tau[t[i]][t[i + 1]] += delta;
+                }
+            }
+
+            // Elitist ant reinforcement
+            const elitistDelta = (2.0 * Q) / Math.max(bestCost, 1e-6);
+            for (let i = 0; i < N - 1; i++) {
+                tau[bestTour[i]][bestTour[i + 1]] += elitistDelta;
+            }
+        }
+
+        return formatClientResult(stops, baselineTour, bestTour, distMatrix, durMatrix, bestHistory, avgHistory);
+    }
+
+    function formatClientResult(stops, baselineTour, bestTour, distMatrix, durMatrix, bestHistory, avgHistory) {
+        const N = stops.length;
+
+        function calcTourMetrics(tour) {
+            let totalDistM = 0;
+            let totalDurS = 0;
+            const legs = [];
+            for (let i = 0; i < N - 1; i++) {
+                const fromIdx = tour[i];
+                const toIdx = tour[i + 1];
+                const d = distMatrix[fromIdx][toIdx];
+                const s = durMatrix[fromIdx][toIdx];
+                totalDistM += d;
+                totalDurS += s;
+                legs.push({
+                    start_label: stops[fromIdx].label || `Stop ${fromIdx}`,
+                    end_label: stops[toIdx].label || `Stop ${toIdx}`,
+                    distance_meters: Math.round(d),
+                    distance_km: Math.round((d / 1000) * 100) / 100,
+                    duration_seconds: Math.round(s),
+                    duration_minutes: Math.round((s / 60) * 10) / 10,
+                });
+            }
+            return {
+                tour: tour,
+                ordered_stops: tour.map((idx) => stops[idx]),
+                total_distance_meters: Math.round(totalDistM),
+                total_distance_km: Math.round((totalDistM / 1000) * 100) / 100,
+                total_duration_seconds: Math.round(totalDurS),
+                total_duration_minutes: Math.round((totalDurS / 60) * 10) / 10,
+                legs: legs,
+            };
+        }
+
+        const baseMetrics = calcTourMetrics(baselineTour);
+        const optMetrics = calcTourMetrics(bestTour);
+
+        const distSavedM = Math.max(0, baseMetrics.total_distance_meters - optMetrics.total_distance_meters);
+        const distSavedKm = Math.round((distSavedM / 1000) * 100) / 100;
+        const durSavedS = Math.max(0, baseMetrics.total_duration_seconds - optMetrics.total_duration_seconds);
+        const durSavedMin = Math.round((durSavedS / 60) * 10) / 10;
+
+        let pctImprovement = 0;
+        if (baseMetrics.total_distance_meters > 0) {
+            pctImprovement = Math.round(((distSavedM / baseMetrics.total_distance_meters) * 100) * 100) / 100;
+        }
+
+        const optCoords = optMetrics.ordered_stops.map((s) => [s.lat, s.lng]);
+        const baseCoords = baseMetrics.ordered_stops.map((s) => [s.lat, s.lng]);
+
+        return {
+            status: "success",
+            dataSource: "SIMULATED DATA (CLIENT ACO ENGINE)",
+            isSimulated: true,
+            optimization_metadata: {
+                algorithm: "Ant Colony Optimization (Open TSP with Fixed Endpoints)",
+                execution_mode: "client_side_fallback",
+            },
+            baseline: baseMetrics,
+            optimized: optMetrics,
+            metrics: {
+                distance_saved_km: distSavedKm,
+                distance_saved_meters: distSavedM,
+                duration_saved_minutes: durSavedMin,
+                duration_saved_seconds: durSavedS,
+                percentage_improvement: pctImprovement,
+            },
+            route_geometry: {
+                polyline: encodePolyline(optCoords),
+                baseline_polyline: encodePolyline(baseCoords),
+                legs: optMetrics.legs,
+            },
+            convergence: {
+                iterations: Array.from({ length: bestHistory.length }, (_, i) => i + 1),
+                best_cost_history: bestHistory,
+                average_cost_history: avgHistory,
+            },
+        };
+    }
+
     /* ==========================================================================
        STOP MANAGEMENT
        ========================================================================== */
@@ -662,19 +937,26 @@
             body: JSON.stringify(payload),
         })
             .then(async (response) => {
-                const data = await response.json();
-                if (!response.ok) {
-                    throw new Error(data.message || `Server returned HTTP ${response.status}`);
+                const contentType = response.headers.get("content-type") || "";
+                if (!response.ok || !contentType.includes("application/json")) {
+                    throw new Error(`Server returned HTTP ${response.status}`);
                 }
-                return data;
+                return await response.json();
             })
             .then((data) => {
                 hideSpinner();
                 handleOptimizationSuccess(data);
             })
             .catch((err) => {
-                hideSpinner();
-                showError(`Optimization Error: ${err.message}`);
+                console.warn(`Backend /api/optimize unavailable (${err.message}). Executing client-side ACO engine...`);
+                try {
+                    const clientResult = solveAcoClientSide(payload);
+                    hideSpinner();
+                    handleOptimizationSuccess(clientResult);
+                } catch (clientErr) {
+                    hideSpinner();
+                    showError(`Optimization Error: ${clientErr.message}`);
+                }
             });
     }
 
